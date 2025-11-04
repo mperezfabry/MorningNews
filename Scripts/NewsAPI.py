@@ -7,6 +7,11 @@ from dotenv import load_dotenv
 # Load environment variables from .env file
 load_dotenv()
 
+#IMPORTANT: Do not hardcode API keys in your code. Use environment variables instead.
+#To get anything here to work, create a .env file in your local the Project/ directory with the following content:
+#NEWS_API_KEY=your_actual_api_key_here
+#Get your NEWSAPI key from https://newsapi.org
+
 class NewsAPI:
     def __init__(self):
         self.api_key = os.getenv('NEWS_API_KEY')
