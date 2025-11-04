@@ -24,6 +24,8 @@ class NewsAPI:
         response = requests.get(self.base_url, headers=self.headers, params=params)
         return response.json()
 
+
+#This isn't actual functional code, just examples of how to use the NewsAPI class
 def print_results(data, limit=5):
     """Print first few articles from the response"""
     if data['status'] == 'ok':
