@@ -34,12 +34,14 @@ class TavilyIngestTests(unittest.TestCase):
                 "content": "Full text",
             }
         ]
-        rows = normalize_articles(articles)
+        rows = normalize_articles(articles, provider="Tavily", topic="Topic")
         self.assertEqual(len(rows), 1)
         row = rows[0]
         self.assertEqual(row[1], "Example")
         self.assertEqual(row[4], "Src")
-        self.assertEqual(row[6], "https://example.com/story")
+        self.assertEqual(row[5], "Tavily")
+        self.assertEqual(row[6], "Topic")
+        self.assertEqual(row[8], "https://example.com/story")
 
     def test_tavily_results_to_articles_maps_payload(self):
         results = [

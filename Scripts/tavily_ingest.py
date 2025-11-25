@@ -95,7 +95,7 @@ def fetch_tavily_articles(label: str, params: Dict, tavily: TavilyClient):
 
 def persist_ingestion(topic: str, articles: List[Dict], meta: Dict, started_at: datetime):
     """Normalize and store article results plus an ingestion log entry."""
-    normalized_rows = normalize_articles(articles)
+    normalized_rows = normalize_articles(articles, provider="Tavily", topic=topic)
     inserted = insert_articles(normalized_rows)
     duplicates = max(len(normalized_rows) - inserted, 0)
     log_ingestion(
@@ -110,7 +110,7 @@ def persist_ingestion(topic: str, articles: List[Dict], meta: Dict, started_at: 
     )
 
 
-def normalize_articles(articles: List[Dict]):
+def normalize_articles(articles: List[Dict], provider: str = "unknown", topic: Optional[str] = None):
     """Convert Tavily article payloads into the DB schema order."""
     normalized: List[Tuple] = []
     for article in articles:
@@ -125,6 +125,8 @@ def normalize_articles(articles: List[Dict]):
                 article.get("description"),
                 article.get("author"),
                 (article.get("source") or {}).get("name", "Tavily"),
+                provider,
+                topic,
                 parse_published_at(article.get("publishedAt")),
                 url,
                 article.get("content"),

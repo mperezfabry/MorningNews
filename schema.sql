@@ -4,6 +4,8 @@ CREATE TABLE IF NOT EXISTS articles (
   description  VARCHAR,
   author       VARCHAR,
   source       VARCHAR NOT NULL,
+  provider     VARCHAR NOT NULL DEFAULT 'unknown', -- pipeline/provider (Tavily, NewsAPI, etc.)
+  topic        VARCHAR,                      -- topical query/category used during ingest
   published_at TIMESTAMP NOT NULL,
   url          VARCHAR NOT NULL,
   content      VARCHAR,
@@ -22,3 +24,5 @@ CREATE TABLE IF NOT EXISTS ingestion_log (
   started_at    TIMESTAMP,
   finished_at   TIMESTAMP
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_articles_url_unique ON articles(url);
