@@ -1,0 +1,10 @@
+{
+    "python.defaultInterpreterPath": "${workspaceFolder}/.venv/Scripts/python.exe",
+    "python.analysis.extraPaths": [
+        "${workspaceFolder}/.venv/Lib/site-packages",
+        "${workspaceFolder}/Scripts",
+        "${workspaceFolder}/tests"
+    ],
+    "python.analysis.autoSearchPaths": false,
+    "python.analysis.useLibraryCodeForTypes": true
+}
