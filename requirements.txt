@@ -4,3 +4,4 @@ sentence-transformers
 scikit-learn
 tqdm
 pydantic
+newsapi-python

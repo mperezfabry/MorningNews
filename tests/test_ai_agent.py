@@ -5,6 +5,8 @@ Run with: pytest -q
 """
 
 import sys
+import os
+import json
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPTS_FOLDER = os.path.join(PROJECT_ROOT, "Scripts")
@@ -12,8 +14,7 @@ SCRIPTS_FOLDER = os.path.join(PROJECT_ROOT, "Scripts")
 sys.path.append(PROJECT_ROOT)
 sys.path.append(SCRIPTS_FOLDER)
 
-import os
-import json
+
 import sqlite3
 import tempfile
 from unittest.mock import patch, MagicMock
@@ -26,8 +27,7 @@ from ai_agent import (
     compute_cluster_ids,
     write_article_tags_to_db,
     fetch_unprocessed_articles,
-    run_daily_agent,
-    DB_PATH,
+    run_daily_agent
 )
 
 # ----------------------------------------------------------
@@ -44,7 +44,7 @@ def temp_db(monkeypatch):
         db_path = os.path.join(tmp, "test.db")
 
         # patch DB_PATH to use temp file
-        monkeypatch.setattr("ai_agent.DB_PATH", db_path)
+        monkeypatch.setenv("MORNINGNEWS_DB_PATH", db_path)
 
         conn = sqlite3.connect(db_path)
         conn.execute("""
@@ -54,11 +54,13 @@ def temp_db(monkeypatch):
             description TEXT,
             author TEXT,
             source TEXT,
+            provider TEXT,
+            topic TEXT,
             published_at TEXT,
             url TEXT,
             content TEXT,
             keywords TEXT
-        )
+        );
         """)
 
         conn.execute("""
@@ -85,10 +87,10 @@ def temp_db(monkeypatch):
 def sample_articles(temp_db):
     conn = sqlite3.connect(temp_db)
     conn.execute("""
-        INSERT INTO articles VALUES
-        ('A1','Title A','Desc','Author','Source','2025','url1','This is article text A',NULL),
-        ('A2','Title B','Desc','Author','Source','2025','url2','This article text is very similar to A',NULL),
-        ('A3','Title C','Desc','Author','Source','2025','url3','Completely unrelated topic',NULL)
+    INSERT INTO articles VALUES
+    ('A1','Title A','Desc','Author','Source','Provider','business','2025','url1','This is article text A',NULL),
+    ('A2','Title B','Desc','Author','Source','Provider','business','2025','url2','This article text is very similar to A',NULL),
+    ('A3','Title C','Desc','Author','Source','Provider','business','2025','url3','Completely unrelated topic',NULL);
     """)
     conn.commit()
     conn.close()

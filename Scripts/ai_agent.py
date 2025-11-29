@@ -24,6 +24,9 @@ from openai import OpenAI
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 
+from storage import connect as storage_connect
+from storage import get_db_path
+
 # -------------------------------------------------------------------
 # Load environment vars
 # -------------------------------------------------------------------
@@ -38,18 +41,6 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 # Embedding Model
 # -------------------------------------------------------------------
 embedder = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
-
-# -------------------------------------------------------------------
-# Database paths (match storage.py conventions)
-# -------------------------------------------------------------------
-DB_PATH = os.path.join(os.path.dirname(__file__), "data", "morningnews.db")
-
-
-def connect_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
-
 
 # -------------------------------------------------------------------
 # Pydantic model for AI output validation
@@ -74,19 +65,18 @@ class ArticleTag(BaseModel):
 # Fetch unprocessed articles
 # -------------------------------------------------------------------
 def fetch_unprocessed_articles(limit: int = 50) -> List[sqlite3.Row]:
-    conn = connect_db()
-    rows = conn.execute(
-        """
-        SELECT id, title, description, content, source, url
-        FROM articles
-        WHERE id NOT IN (SELECT article_id FROM article_ai_tags)
-        ORDER BY published_at DESC
-        LIMIT ?
-        """,
-        (limit,),
-    ).fetchall()
-    conn.close()
-    return rows
+    with storage_connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, title, description, content, source, url
+            FROM articles
+            WHERE id NOT IN (SELECT article_id FROM article_ai_tags)
+            ORDER BY published_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return rows
 
 
 # -------------------------------------------------------------------
@@ -189,33 +179,32 @@ def compute_cluster_ids(articles: List[sqlite3.Row]) -> Dict[str, str]:
 # Write tag to DB
 # -------------------------------------------------------------------
 def write_article_tags_to_db(article_id: str, tag: ArticleTag):
-    conn = connect_db()
-    conn.execute(
-        """
-        INSERT INTO article_ai_tags (
-            article_id, quality_score, reliability_score,
-            misinformation_flag, extreme_bias_flag, political_bias,
-            sentiment_label, sentiment_score,
-            redundant_flag, cluster_id, processed_at
+    with storage_connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO article_ai_tags (
+                article_id, quality_score, reliability_score,
+                misinformation_flag, extreme_bias_flag, political_bias,
+                sentiment_label, sentiment_score,
+                redundant_flag, cluster_id, processed_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                article_id,
+                tag.quality_score,
+                tag.reliability_score,
+                tag.misinformation_flag,
+                tag.extreme_bias_flag,
+                tag.political_bias,
+                tag.sentiment_label,
+                tag.sentiment_score,
+                tag.redundant_flag,
+                tag.cluster_id,
+                datetime.utcnow().isoformat(),
+            ),
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            article_id,
-            tag.quality_score,
-            tag.reliability_score,
-            tag.misinformation_flag,
-            tag.extreme_bias_flag,
-            tag.political_bias,
-            tag.sentiment_label,
-            tag.sentiment_score,
-            tag.redundant_flag,
-            tag.cluster_id,
-            datetime.utcnow().isoformat(),
-        ),
-    )
-    conn.commit()
-    conn.close()
+        conn.commit()
 
 
 # -------------------------------------------------------------------
@@ -249,28 +238,37 @@ ARTICLES:
 
 
 def write_summary_to_db(category: str, summary_text: str):
-    conn = connect_db()
-    conn.execute(
-        """
-        INSERT OR REPLACE INTO daily_summaries (
-            summary_date, category, summary_text, generated_at
-        ) VALUES (?, ?, ?, ?)
-        """,
-        (
-            date.today().isoformat(),
-            category,
-            summary_text,
-            datetime.utcnow().isoformat(),
-        ),
-    )
-    conn.commit()
-    conn.close()
+    with storage_connect() as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO daily_summaries (
+                summary_date, category, summary_text, generated_at
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (
+                date.today().isoformat(),
+                category,
+                summary_text,
+                datetime.utcnow().isoformat(),
+            ),
+        )
+        conn.commit()
 
 
 # -------------------------------------------------------------------
 # Orchestrator
 # -------------------------------------------------------------------
 def run_daily_agent():
+    CATEGORY_KEYWORDS = {
+    "business": ["business", "markets", "economy", "finance", "stocks"],
+    "technology": ["tech", "technology", "ai", "software", "hardware"],
+    "science": ["science", "research", "space", "biology", "physics"],
+    "health": ["health", "medicine", "medical", "covid"],
+    "sports": ["sports", "sport", "nba", "nfl", "mlb"],
+    "politics": ["politics", "government", "policy", "congress"],
+    "international": ["world", "international", "global", "geopolitics"],
+    }
+    
     print("\nLoading unprocessed articles...")
     articles = fetch_unprocessed_articles(limit=200)
 
@@ -298,30 +296,33 @@ def run_daily_agent():
     # You can later expand categories using your ingestion categories
     categories = ["business", "technology", "science", "health", "sports", "politics", "international"]
 
-    conn = connect_db()
-    for category in categories:
-        rows = conn.execute(
-            """
-            SELECT a.title, a.description, a.content
-            FROM articles a
-            WHERE lower(a.source) LIKE ?
-            """,
-            (f"%{category}%",),
-        ).fetchall()
+    with storage_connect() as conn:
+        for category in categories:
+            keywords = CATEGORY_KEYWORDS.get(category, [])
+            rows = conn.execute(
+                f"""
+                SELECT a.title, a.description, a.content
+                FROM articles a
+                WHERE {" OR ".join(["lower(a.topic) LIKE ?"] * len(keywords))}
+                """,
+                tuple([f"%{kw}%" for kw in keywords]),
+            ).fetchall()
 
-        if not rows:
-            continue
+            if not rows:
+                continue
 
-        texts = [
-            (r["content"] or r["description"] or r["title"]) for r in rows
-        ]
-        summary = generate_category_summary(category, texts)
-        write_summary_to_db(category, summary)
+            if not keywords:
+                continue
 
-        print(f"✓ Summary for {category}")
+            texts = [
+                (r["content"] or r["description"] or r["title"]) for r in rows
+            ]
+            summary = generate_category_summary(category, texts)
+            write_summary_to_db(category, summary)
 
-    conn.close()
-    print("\nDaily agent run complete.\n")
+            print(f"✓ Summary for {category}")
+
+        print("\nDaily agent run complete.\n")
 
 
 # -------------------------------------------------------------------
