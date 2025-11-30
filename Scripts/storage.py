@@ -6,20 +6,52 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Mapping, Sequence
+from typing import Mapping, Sequence
 
-DB_PATH = Path(__file__).parent / "data" / "morningnews.db"
+# Path to the SQLite DB file: <project>/Scripts/data/morningnews.db
+BASE_DIR = Path(__file__).parent
+DB_DIR = BASE_DIR / "data"
+DB_PATH = DB_DIR / "morningnews.db"
+SCHEMA_PATH = BASE_DIR / "schema.sql"
 
 
 def ensure_db_exists() -> None:
-    """Raise if the expected database file is missing."""
-    if not DB_PATH.exists():
-        raise FileNotFoundError(f"Database not found at {DB_PATH}. Run schema.sql first.")
+    """
+    Ensure the SQLite database file and schema exist.
+
+    - Creates the data directory if needed.
+    - If the DB file does not yet exist, it is created.
+    - The schema defined in schema.sql is executed (idempotent).
+    """
+    # Make sure the directory for the DB exists
+    DB_DIR.mkdir(parents=True, exist_ok=True)
+
+    # If DB already exists, we still run schema.sql because it uses
+    # CREATE TABLE IF NOT EXISTS, so it's safe and keeps schema in sync.
+    if not SCHEMA_PATH.exists():
+        # If you want stricter behavior, you could raise here instead.
+        raise FileNotFoundError(
+            f"Database schema file not found at {SCHEMA_PATH}. "
+            f"Please ensure schema.sql is present."
+        )
+
+    # Connect (this will create the file if it doesn't exist)
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        with SCHEMA_PATH.open("r", encoding="utf-8") as f:
+            schema_sql = f.read()
+        # Execute the schema in a single script call; it's idempotent due to
+        # 'CREATE TABLE IF NOT EXISTS' in schema.sql
+        conn.executescript(schema_sql)
+        conn.commit()
+    finally:
+        conn.close()
 
 
 @contextmanager
 def connect():
     """Context manager that yields a SQLite connection with row factory."""
+    # Ensure DB and tables exist before providing a connection
     ensure_db_exists()
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
