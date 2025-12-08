@@ -10,6 +10,10 @@ CREATE TABLE IF NOT EXISTS articles (
   url          VARCHAR NOT NULL,
   content      VARCHAR,
   keywords     VARCHAR,                       -- CSV of spaCy noun chunks or tf-idf terms
+  sentiment_score REAL,
+  bias_score   REAL,
+  is_clickbait BOOLEAN,
+  ai_summary   TEXT,
   ingested_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 

@@ -7,12 +7,17 @@ Run with: pytest -q
 import sys
 import os
 import json
+import importlib.util
+import os
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPTS_FOLDER = os.path.join(PROJECT_ROOT, "Scripts")
 
 sys.path.append(PROJECT_ROOT)
 sys.path.append(SCRIPTS_FOLDER)
+
+os.environ.setdefault("AI_AGENT_DRY_RUN", "1")
+os.environ.setdefault("OPENAI_API_KEY", "test-key")
 
 
 import sqlite3
@@ -21,6 +26,10 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 from datetime import datetime
+
+# Skip if optional dependencies are missing
+if importlib.util.find_spec("sentence_transformers") is None:
+    pytest.skip("sentence-transformers not installed", allow_module_level=True)
 
 from ai_agent import (
     ArticleTag,

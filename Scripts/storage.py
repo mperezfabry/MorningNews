@@ -171,13 +171,21 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
 
 
 def _ensure_article_columns(conn: sqlite3.Connection) -> None:
-    """Backfill missing article columns (provider/topic) on existing DBs."""
+    """Backfill missing article columns on existing DBs."""
     existing = {row[1] for row in conn.execute("PRAGMA table_info(articles)").fetchall()}
     alters = []
     if "provider" not in existing:
         alters.append("ALTER TABLE articles ADD COLUMN provider VARCHAR NOT NULL DEFAULT 'unknown'")
     if "topic" not in existing:
         alters.append("ALTER TABLE articles ADD COLUMN topic VARCHAR")
+    if "sentiment_score" not in existing:
+        alters.append("ALTER TABLE articles ADD COLUMN sentiment_score REAL")
+    if "bias_score" not in existing:
+        alters.append("ALTER TABLE articles ADD COLUMN bias_score REAL")
+    if "is_clickbait" not in existing:
+        alters.append("ALTER TABLE articles ADD COLUMN is_clickbait BOOLEAN")
+    if "ai_summary" not in existing:
+        alters.append("ALTER TABLE articles ADD COLUMN ai_summary TEXT")
     for stmt in alters:
         conn.execute(stmt)
 

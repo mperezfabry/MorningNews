@@ -1,34 +1,22 @@
-import os
-import json
-import hashlib
 import glob
-from datetime import datetime, timezone
+import hashlib
+import json
+import os
 import sys
+from datetime import datetime, timezone
+from pathlib import Path
 
-# --- PATH SETUP (Crucial for Imports) ---
-# Add the project root directory to sys.path so we can import 'storage'
+# --- PATH SETUP (allow running from anywhere) ---
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-current_dir = os.path.dirname(os.path.abspath(__file__))
-print(current_dir)
-parent_dir = os.path.dirname(current_dir)
-print(parent_dir)
-
-if current_dir not in sys.path:
-    sys.path.append(current_dir)
-if parent_dir not in sys.path:
-    sys.path.append(parent_dir)
-
-# Try to import storage helper functions
-try:
-    from Scripts.storage import Something
-except ImportError:
-    print("CRITICAL ERROR: Could not import 'storage.py'. Ensure it is in the MorningNews root folder.")
-    sys.exit(1)
+from storage import insert_articles, log_ingestion  # noqa: E402
 
 # --- CONFIGURATION ---
-# We look for data in the 'data' folder inside Scripts
-DATA_DIR = os.path.join(current_dir, 'data')
-FILE_PATTERN = os.path.join(DATA_DIR, '*_headlines.json')
+# Ingest JSON snapshots from repo-level data folder
+DATA_DIR = ROOT / "data"
+FILE_PATTERN = str(DATA_DIR / "*_headlines.json")
 
 
 # --- HELPER FUNCTIONS ---
@@ -84,20 +72,20 @@ def normalize_article(article):
 
     keywords = ""
 
-    # Tuple matching table schema:
-    # id, title, description, author, source, published_at, url, content, keywords
-    row = (
+    # Tuple matching table schema order (storage.insert_articles expects 11 fields)
+    return (
         article_id,
         article.get("title"),
         article.get("description"),
         article.get("author"),
         source_name,
+        "json_import",        # provider
+        None,                 # topic (optional)
         published_at_iso,
         url,
         article.get("content"),
         keywords,
     )
-    return row
 
 
 def process_file(filepath):

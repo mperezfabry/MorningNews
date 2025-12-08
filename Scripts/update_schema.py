@@ -5,7 +5,7 @@ import os
 # I'm setting up dynamic paths here so this script works regardless of where it's run from.
 # This ensures it always finds 'morningnews.db' in the 'data' folder and 'schema.sql' in the root.
 DB_PATH = os.path.join(os.path.dirname(__file__), 'data', 'morningnews.db')
-SCHEMA_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'Scripts\\schema.sql')
+SCHEMA_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'schema.sql')
 
 """
 The update_db function applies the latest schema changes to the SQLite database.
@@ -17,9 +17,7 @@ or delete the database every time we add a new table (like 'bookmarks').
 
 # Sanity check to ensure the database exists before trying to update it.
 def update_db():
-    if not os.path.exists(DB_PATH):
-        print(f"Database not found at {DB_PATH}")
-        return
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
     # This reads the full SQL schema file.
     # This allows us to maintain a single source of truth for our database structure in 'schema.sql'.

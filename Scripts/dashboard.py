@@ -1,23 +1,14 @@
-import sys
-import os
-
-# --- PATH SETUP ---
-# I needed to do this path hacking because 'storage.py' is in the root folder,
-# but this script runs from inside 'Scripts/'. Without adding the parent directory
-# to sys.path, Python can't find 'storage' and crashes.
-current_dir = os.path.dirname(os.path.abspath(__file__))
-parent_dir = os.path.dirname(current_dir)
-
-if current_dir not in sys.path:
-    sys.path.append(current_dir)
-if parent_dir not in sys.path:
-    sys.path.append(parent_dir)
+from pathlib import Path
 
 import streamlit as st
 import pandas as pd
 import sqlite3
 import altair as alt
 from io import BytesIO
+import re
+import hashlib
+import json
+from typing import Dict, List
 
 # Attempt to import gTTS for the audio feature.
 # I wrapped this in a try/except block so the whole app doesn't crash if
@@ -29,24 +20,38 @@ try:
 except ImportError:
     HAS_AUDIO = False
 
-# FIX: Re-implementing the robust path definition.
-# We import 'get_db_path' and assign its result to the global DB_PATH variable.
-try:
-    from Scripts.storage import get_db_path
-
-    DB_PATH = get_db_path()  # <-- CRITICAL FIX: The DB_PATH variable is now defined here
-except ImportError:
-    st.error("Critical Error: Could not import 'storage.py'. Please ensure it exists in the project root.")
-    st.stop()
-# END FIX
-
-# --- CONFIGURATION ---
+# --- CONFIGURATION (set early per Streamlit guidance) ---
 st.set_page_config(
     page_title="MorningNews AI",
     page_icon="🤖",
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+# --- CONSTANTS ---
+SENTIMENT_POSITIVE_THRESHOLD = 0.6
+SENTIMENT_NEGATIVE_THRESHOLD = 0.4
+STOP_WORDS = set(
+    [
+        'the','and','to','of','in','a','for','on','with','at','by','is','it','from','as','be',
+        'that','this','new','after','report','says','will','today','news','update','latest','breaking',
+        'about','their','over','under','into','more','could','would','should','while','where','there'
+    ]
+)
+
+# FIX: Re-implementing the robust path definition.
+# We import 'get_db_path' and assign its result to the global DB_PATH variable.
+try:
+    from storage import get_db_path
+
+    DB_PATH = Path(get_db_path())
+    if not DB_PATH.exists():
+        st.error(f"Critical Error: Database not found at {DB_PATH}")
+        st.stop()
+except ImportError:
+    st.error("Critical Error: Could not import 'storage.py'. Please ensure it exists in the project root.")
+    st.stop()
+# END FIX
 
 # Custom CSS
 # I added some custom styling here to make the article cards look cleaner and
@@ -95,6 +100,17 @@ st.markdown("""
     }
     .tag-clickbait { background-color: #f59e0b; } /* Orange */
     .tag-verified { background-color: #10b981; } /* Green */
+    .badge {
+        display: inline-block;
+        padding: 4px 10px;
+        border-radius: 999px;
+        background: #eef2ff;
+        color: #312e81;
+        font-size: 0.75em;
+        font-weight: 700;
+        margin-right: 6px;
+    }
+    .badge-provider { background: #f0f9ff; color: #0f172a; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -108,86 +124,108 @@ def load_data():
     I'm caching this for 5 minutes (ttl=300) so we don't hammer the database
     every time we click a button.
     """
-    # Use DB_PATH here
-    if not DB_PATH.exists():
-        return pd.DataFrame()
+    with sqlite3.connect(DB_PATH) as conn:
+        query = """
+            SELECT 
+                id, title, description, author, source, published_at, url, content,
+                sentiment_score, bias_score, is_clickbait, ai_summary, topic, provider
+            FROM articles
+            ORDER BY published_at DESC
+            LIMIT 2000
+        """
+        df = pd.read_sql_query(query, conn)
+
+    if df.empty:
+        return df
 
     try:
-        with sqlite3.connect(DB_PATH) as conn:
-            # I'm explicitly selecting all columns we need, including the new AI ones.
-            # I added a LIMIT 2000 to prevent the dashboard from getting too slow if
-            # the database grows huge over time.
-            query = """
-                SELECT 
-                    id, title, description, author, source, published_at, url, content,
-                    sentiment_score, bias_score, is_clickbait, ai_summary
-                FROM articles
-                ORDER BY published_at DESC
-                LIMIT 2000
-            """
-            # Fallback logic: if the new columns don't exist yet, just grab everything.
-            try:
-                df = pd.read_sql_query(query, conn)
-            except Exception:
-                fallback_query = "SELECT * FROM articles ORDER BY published_at DESC LIMIT 2000"
-                df = pd.read_sql_query(fallback_query, conn)
+        df['published_at'] = pd.to_datetime(df['published_at'], format='mixed', errors='coerce', utc=True)
+    except ValueError:
+        df['published_at'] = pd.to_datetime(df['published_at'], infer_datetime_format=True, errors='coerce',
+                                            utc=True)
 
-            if df.empty:
-                return df
+    df = df.dropna(subset=['published_at'])
+    df['date_display'] = df['published_at'].dt.strftime('%b %d, %H:%M')
+    df['source'] = df['source'].fillna('Unknown Source')
 
-            # Date parsing can be tricky with different formats in the DB.
-            # I used format='mixed' and errors='coerce' to be safe—if a date is bad,
-            # it just becomes NaT instead of crashing the whole app.
-            try:
-                df['published_at'] = pd.to_datetime(df['published_at'], format='mixed', errors='coerce', utc=True)
-            except ValueError:
-                df['published_at'] = pd.to_datetime(df['published_at'], infer_datetime_format=True, errors='coerce',
-                                                    utc=True)
+    if 'bias_score' not in df.columns:
+        df['bias_score'] = 0.0
+    else:
+        df['bias_score'] = df['bias_score'].fillna(0.0)
 
-            df = df.dropna(subset=['published_at'])
-            df['date_display'] = df['published_at'].dt.strftime('%b %d, %H:%M')
-            df['source'] = df['source'].fillna('Unknown Source')
+    if 'sentiment_score' not in df.columns:
+        df['sentiment_score'] = 0.5
+    else:
+        df['sentiment_score'] = df['sentiment_score'].fillna(0.5)
 
-            # --- AI DATA HANDLING (Simulation / Defaulting) ---
-            # IMPORTANT: The defaults below are what cause the filtering issue if the
-            # run_ai_analysis.py script hasn't completed or if the database is new.
+    if 'is_clickbait' not in df.columns:
+        df['is_clickbait'] = False
+    else:
+        df['is_clickbait'] = df['is_clickbait'].fillna(0).astype(bool)
 
-            if 'bias_score' not in df.columns:
-                df['bias_score'] = 0.0
-            else:
-                df['bias_score'] = df['bias_score'].fillna(0.0)
+    if 'ai_summary' not in df.columns:
+        df['ai_summary'] = df['description']
+    else:
+        df['ai_summary'] = df['ai_summary'].fillna(df['description'])
 
-            if 'sentiment_score' not in df.columns:
-                # Defaulting to neutral (0.5) is the culprit for the filter issue if no analysis has run.
-                df['sentiment_score'] = 0.5
-            else:
-                df['sentiment_score'] = df['sentiment_score'].fillna(0.5)
+    if "topic" not in df.columns:
+        df["topic"] = pd.NA
+    if "provider" not in df.columns:
+        df["provider"] = pd.NA
 
-            if 'is_clickbait' not in df.columns:
-                df['is_clickbait'] = False
-            else:
-                # SQLite stores booleans as 0/1 usually, so I convert to bool here.
-                df['is_clickbait'] = df['is_clickbait'].fillna(0).astype(bool)
+    def _infer_topic(row):
+        if pd.notna(row.get("topic")) and str(row.get("topic")).strip():
+            return str(row.get("topic")).strip()
+        text = ((row.get("title") or "") + " " + (row.get("description") or "")).lower()
+        source = (row.get("source") or "").lower()
+        provider = (row.get("provider") or "").lower()
 
-            if 'ai_summary' not in df.columns:
-                df['ai_summary'] = df['description']
-            else:
-                df['ai_summary'] = df['ai_summary'].fillna(df['description'])
+        keyword_map = {
+            "business": ["market", "stocks", "finance", "economy", "business"],
+            "technology": ["tech", "ai", "software", "hardware"],
+            "science": ["science", "research", "space", "biology"],
+            "health": ["health", "medicine", "covid"],
+            "sports": ["sport", "game", "nfl", "nba", "mlb", "soccer"],
+            "politics": ["election", "policy", "government", "congress", "senate"],
+            "international": ["world", "international", "global", "geopolitics"],
+        }
+        for cat, kws in keyword_map.items():
+            if any(kw in text for kw in kws):
+                return cat.title()
+        if provider:
+            return provider.title()
+        if source:
+            return source.title()
+        return "Uncategorized"
 
-            return df
-    except Exception as e:
-        st.error(f"Error loading database: {e}")
-        return pd.DataFrame()
+    df["inferred_topic"] = df.apply(_infer_topic, axis=1)
+    df["topic_display"] = (
+        df["topic"]
+        .fillna(df["inferred_topic"])
+        .fillna("Uncategorized")
+        .astype(str)
+        .str.strip()
+        .replace("", "Uncategorized")
+        .str.title()
+    )
+
+    return df
 
 
-def toggle_bookmark(article_id):
+def toggle_bookmark(article_id: str):
     """
     Adds or removes an article from the bookmarks table.
     I used a simple check-then-insert/delete logic here.
     """
-    # Use DB_PATH here
     try:
         with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS bookmarks (
+                    article_id TEXT PRIMARY KEY
+                )
+                """
+            )
             cur = conn.execute("SELECT 1 FROM bookmarks WHERE article_id = ?", (article_id,))
             exists = cur.fetchone()
             if exists:
@@ -199,22 +237,18 @@ def toggle_bookmark(article_id):
         st.error(f"Bookmark error: {e}")
 
 
-def get_bookmarks():
-    """Returns a simple list of IDs for articles the user has saved."""
-    # Use DB_PATH here
-    if not DB_PATH.exists(): return []
+@st.cache_data(ttl=60, show_spinner=False)
+def load_bookmarks():
+    """Cached bookmark loader to reduce DB hits."""
     try:
         with sqlite3.connect(DB_PATH) as conn:
-            try:
-                df = pd.read_sql_query("SELECT article_id FROM bookmarks", conn)
-                return df['article_id'].tolist()
-            except:
-                return []
-    except:
+            df = pd.read_sql_query("SELECT article_id FROM bookmarks", conn)
+            return df['article_id'].tolist()
+    except Exception:
         return []
 
 
-def generate_audio(text):
+def generate_audio(text: str):
     """
     Uses gTTS to generate an audio file in memory (BytesIO) so we don't have to save mp3s to disk.
     If gTTS isn't installed, it just warns the user.
@@ -227,10 +261,123 @@ def generate_audio(text):
         tts = gTTS(text=text, lang='en', slow=False)
         fp = BytesIO()
         tts.write_to_fp(fp)
+        fp.seek(0)
         return fp
     except Exception as e:
         st.warning(f"Audio generation failed: {e}")
         return None
+
+
+def clean_content_for_display(text: str | None) -> str:
+    """Strip common navigation filler lines from scraped summaries."""
+    if not text:
+        return ""
+    lines = []
+    skip_prefixes = ("browse", "skip links", "skip to content", "all quotes delayed")
+    for line in str(text).splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        lower = stripped.lower()
+        if any(lower.startswith(prefix) for prefix in skip_prefixes):
+            continue
+        lines.append(stripped)
+    return " ".join(lines)
+
+
+def get_filters(df: pd.DataFrame, coverage: Dict[str, float]) -> Dict:
+    """Render sidebar controls and return selected filter state."""
+    with st.sidebar:
+        st.title("🤖 MorningNews AI")
+        st.caption("Curate, filter, and brief your feed.")
+        st.caption(
+            f"AI coverage • summaries: {coverage.get('ai_summary_pct', 0):.0f}% • "
+            f"bias: {coverage.get('bias_score_pct', 0):.0f}%"
+        )
+
+        with st.expander("Personalize", expanded=True):
+            watchlist_input = st.text_input(
+                "Watchlist (comma separated)",
+                placeholder="Crypto, AI, SpaceX",
+            )
+            watchlist = [t.strip().lower() for t in watchlist_input.split(",") if t.strip()]
+
+        with st.expander("Filters", expanded=True):
+            min_date = df["published_at"].min().date()
+            max_date = df["published_at"].max().date()
+            selected = st.date_input(
+                "Date Range",
+                value=(min_date, max_date),
+                min_value=min_date,
+                max_value=max_date,
+            )
+            sources = st.multiselect("Sources", options=sorted(df["source"].unique()))
+            categories_default = st.session_state.get("category_filter", [])
+            categories = st.multiselect(
+                "Categories",
+                options=sorted(df["topic_display"].unique()),
+                default=categories_default,
+            )
+            good_news_only = st.checkbox(f"Positive sentiment only (>= {SENTIMENT_POSITIVE_THRESHOLD})")
+            show_bookmarks = st.checkbox("Bookmarked only")
+            st.caption(
+                f"Sentiment tags: Positive ≥ {SENTIMENT_POSITIVE_THRESHOLD}, "
+                f"Negative < {SENTIMENT_NEGATIVE_THRESHOLD}; bias meter ranges -1 (Left) to 1 (Right)."
+            )
+
+    return {
+        "date_selection": selected,
+        "sources": sources,
+        "categories": categories,
+        "good_news_only": good_news_only,
+        "show_bookmarks": show_bookmarks,
+        "watchlist": watchlist,
+    }
+
+
+def apply_filters(df: pd.DataFrame, filters: Dict, bookmarks: List[str]) -> pd.DataFrame:
+    """Apply all filters to the dataframe and return the result."""
+    filtered = df.copy()
+
+    selected = filters["date_selection"]
+    if isinstance(selected, (list, tuple)) and len(selected) == 2:
+        start_date, end_date = selected
+    else:
+        start_date = end_date = selected
+    mask = (filtered["published_at"].dt.date >= start_date) & (filtered["published_at"].dt.date <= end_date)
+    filtered = filtered.loc[mask]
+
+    if filters["sources"]:
+        filtered = filtered[filtered["source"].isin(filters["sources"])]
+
+    if filters["categories"]:
+        st.session_state.category_filter = filters["categories"]
+        filtered = filtered[filtered["topic_display"].isin(filters["categories"])]
+    else:
+        st.session_state.category_filter = []
+
+    if filters["good_news_only"]:
+        filtered = filtered[filtered["sentiment_score"] >= SENTIMENT_POSITIVE_THRESHOLD]
+
+    if filters["show_bookmarks"]:
+        filtered = filtered[filtered["id"].isin(bookmarks)]
+
+    return filtered
+
+
+def filters_hash(filters: Dict) -> str:
+    """Stable hash of filter state for pagination resets."""
+    safe = {}
+    for k, v in filters.items():
+        if k == "watchlist":
+            # Changing watchlist shouldn't reset pagination
+            continue
+        if isinstance(v, (list, tuple, set)):
+            safe[k] = list(v)
+        else:
+            safe[k] = v
+    blob = json.dumps(safe, sort_keys=True, default=str)
+    return hashlib.md5(blob.encode("utf-8")).hexdigest()
 
 
 # --- MAIN APP ---
@@ -239,78 +386,92 @@ def main():
     # Initialize session state for bookmarks so we can track what's saved across reruns
     # This must be inside main() where st.session_state is available
     if 'bookmarks' not in st.session_state:
-        st.session_state.bookmarks = get_bookmarks()
+        st.session_state.bookmarks = load_bookmarks()
 
     df = load_data()
     if df.empty:
         st.warning("⚠️ No data found. Run ingestion scripts first.")
         return
 
-    # --- SIDEBAR: CONTROLS & PERSONALIZATION ---
-    with st.sidebar:
-        st.title("🤖 MorningNews AI")
-        st.caption("Intelligent Daily Briefing")
+    bias_data_present = df["bias_score"].abs().max(skipna=True) > 0.01
+    total = len(df)
+    ai_summary_pct = (df["ai_summary"].notna().sum() / total * 100) if total else 0.0
+    bias_score_pct = (df["bias_score"].notna().sum() / total * 100) if total else 0.0
+    coverage = {"ai_summary_pct": ai_summary_pct, "bias_score_pct": bias_score_pct}
 
-        st.header("Personalization")
-        # Watchlist: User types keywords, we highlight them in the feed.
-        watchlist_input = st.text_input("My Watchlist (comma separated)", placeholder="Crypto, AI, SpaceX")
-        watchlist = [t.strip().lower() for t in watchlist_input.split(',')] if watchlist_input else []
-
-        st.header("AI Filters")
-        # These toggles let us filter by the AI-generated metadata.
-        good_news_only = st.checkbox("Show only Positive News (+ Sentiment)")
-        show_bookmarks = st.checkbox("Show Bookmarked Only")
-
-        st.divider()
-
-        # Standard Filters
-        min_date = df['published_at'].min().date()
-        max_date = df['published_at'].max().date()
-        selected_date = st.date_input("Date Range", value=(min_date, max_date), min_value=min_date, max_value=max_date)
-
-        sources = st.multiselect("Sources", options=sorted(df['source'].unique()))
-
-    # --- FILTERING LOGIC ---
-    # I create a copy so I don't mess up the original cached dataframe.
-    filtered = df.copy()
-
-    # 1. Date Filter
-    if isinstance(selected_date, tuple) and len(selected_date) == 2:
-        mask = (filtered['published_at'].dt.date >= selected_date[0]) & (
-                    filtered['published_at'].dt.date <= selected_date[1])
-        filtered = filtered.loc[mask]
-
-    # 2. Source Filter
-    if sources:
-        filtered = filtered[filtered['source'].isin(sources)]
-
-    # 3. Good News Filter (Sentiment >= 0.6)
-    if good_news_only:
-        filtered = filtered[filtered['sentiment_score'] >= 0.6]
-
-    # 4. Bookmark Filter
-    if show_bookmarks:
-        filtered = filtered[filtered['id'].isin(st.session_state.bookmarks)]
+    filters = get_filters(df, coverage)
+    filtered = apply_filters(df, filters, st.session_state.bookmarks)
+    watchlist = filters["watchlist"]
+    current_hash = filters_hash(filters)
+    if "filters_hash" not in st.session_state or st.session_state.filters_hash != current_hash:
+        st.session_state.filters_hash = current_hash
+        st.session_state.page = 1
 
     # --- TABS ---
     tab_feed, tab_brief, tab_viz = st.tabs(["📰 Smart Feed", "🎙️ Daily Brief", "📈 Trends"])
+
+    # Precompile watchlist regex once per run
+    watch_terms = [t for t in watchlist if t]
+    watch_pattern = None
+    if watch_terms:
+        watch_pattern = re.compile(r"\b(" + "|".join(map(re.escape, watch_terms)) + r")\b", re.IGNORECASE)
 
     # --- TAB 1: SMART FEED ---
     with tab_feed:
         st.subheader(f"Top Stories ({len(filtered)})")
 
-        # Simple Pagination: showing only top 20 to keep the UI snappy.
-        # Can add a 'load more' button later if needed.
+        if not bias_data_present:
+            st.info("Bias meter data missing (bias_score ~ 0). Run `python3 Scripts/ai_analysis.py` with GEMINI_API_KEY to populate AI fields.")
+
+        # Quick category pills
+        top_categories = [c for c in sorted(df['topic_display'].unique()) if c and c.lower() != "uncategorized"][:8]
+        cols = st.columns(len(top_categories) + 1) if top_categories else st.columns(1)
+        with cols[0]:
+            if st.button("All", key="cat_all"):
+                st.session_state.category_filter = []
+                st.rerun()
+        for idx, cat in enumerate(top_categories, start=1):
+            with cols[idx]:
+                active = cat in st.session_state.get("category_filter", [])
+                label = f"✅ {cat}" if active else cat
+                if st.button(label, key=f"cat_{cat}"):
+                    st.session_state.category_filter = [] if active else [cat]
+                    st.rerun()
+
+        # Simple Pagination with session state
         page_size = 20
-        page_data = filtered.head(page_size)
+        page_total = max((len(filtered) - 1) // page_size + 1, 1)
+        if "page" not in st.session_state:
+            st.session_state.page = 1
+        if st.session_state.page > page_total:
+            st.session_state.page = page_total
+        col_prev, col_page, col_next = st.columns([0.2, 0.6, 0.2])
+        with col_prev:
+            if st.button("⬅️ Prev", disabled=st.session_state.page <= 1):
+                st.session_state.page = max(1, st.session_state.page - 1)
+                st.rerun()
+        with col_page:
+            st.markdown(f"<div style='text-align:center;'>Page {st.session_state.page} / {page_total}</div>", unsafe_allow_html=True)
+        with col_next:
+            if st.button("Next ➡️", disabled=st.session_state.page >= page_total):
+                st.session_state.page = min(page_total, st.session_state.page + 1)
+                st.rerun()
+
+        start = (st.session_state.page - 1) * page_size
+        page_data = filtered.iloc[start : start + page_size]
+
+        if page_data.empty:
+            st.info("No articles match your filters. Try widening the date range or clearing bookmarks.")
 
         for _, row in page_data.iterrows():
             # Check Watchlist Match
-            is_watchlist = any(term in (row['title'] + str(row['description'])).lower() for term in watchlist)
+            haystack = (row['title'] + " " + str(row['description']))
+            is_watchlist = bool(watch_pattern.search(haystack)) if watch_pattern else False
 
             # Dynamic CSS class for highlighting
             card_style = "article-card highlight-card" if is_watchlist else "article-card"
 
+            st.markdown(f'<div class="{card_style}">', unsafe_allow_html=True)
             with st.container():
                 if is_watchlist:
                     st.info("👀 Matches your watchlist")
@@ -322,11 +483,21 @@ def main():
                     warning = "⚠️ " if row['is_clickbait'] else ""
                     st.markdown(f"#### [{warning}{row['title']}]({row['url']})")
 
-                    st.caption(f"**{row['source']}** • {row['date_display']}")
+                    badges = ""
+                    topic_badge = row.get("topic_display") or "Uncategorized"
+                    provider = row.get("source") or "Unknown"
+                    badges += f'<span class="badge">{topic_badge}</span>'
+                    badges += f'<span class="badge badge-provider">{provider}</span>'
+                    st.markdown(badges, unsafe_allow_html=True)
+                    st.caption(f"{row['date_display']}")
 
                     # BIAS METER VISUALIZATION
-                    # I'm doing a little math here to map the -1 to 1 score to a 0-100% css position.
-                    bias_pct = (row['bias_score'] + 1) / 2 * 100
+                    try:
+                        bias_raw = float(row['bias_score'])
+                    except Exception:
+                        bias_raw = 0.0
+                    bias_clamped = max(-1.0, min(1.0, bias_raw))
+                    bias_pct = (bias_clamped + 1) / 2 * 100
                     st.markdown(f"""
                         <div style="display:flex; align-items:center; gap:10px; font-size:0.8em; margin-bottom:5px; width: 60%;">
                             <span style="color:blue">Left</span>
@@ -339,70 +510,86 @@ def main():
 
                     # Prefer the AI summary if we have it, otherwise fallback to description.
                     content_text = row['ai_summary'] if row['ai_summary'] else row['description']
+                    content_text = clean_content_for_display(content_text)
                     if content_text:
                         st.write(content_text)
 
                 with c2:
                     # Bookmark Button Logic
-                    # Using a unique key for each button is critical in Streamlit loops!
                     is_saved = row['id'] in st.session_state.bookmarks
                     btn_label = "★ Saved" if is_saved else "☆ Save"
                     if st.button(btn_label, key=f"btn_{row['id']}"):
                         toggle_bookmark(row['id'])
-                        st.session_state.bookmarks = get_bookmarks()  # Refresh state immediately
+                        load_bookmarks.clear()  # Avoid stale cached bookmarks
+                        st.session_state.bookmarks = load_bookmarks()  # Refresh state immediately
                         st.rerun()
 
-                    # Tags
-                    # The tag for clickbait is now redundant next to the title, but kept here for clarity.
                     if row['is_clickbait']:
                         st.markdown('<span class="tag tag-clickbait">Clickbait</span>', unsafe_allow_html=True)
 
-                    # Sentiment Tag logic
                     sent = row['sentiment_score']
-                    if sent > 0.6:
+                    if sent >= SENTIMENT_POSITIVE_THRESHOLD:
                         st.markdown('<span class="tag tag-verified">Positive</span>', unsafe_allow_html=True)
-                    elif sent < 0.4:
+                    elif sent < SENTIMENT_NEGATIVE_THRESHOLD:
                         st.markdown('<span class="tag" style="background-color:#ef4444">Negative</span>',
                                     unsafe_allow_html=True)
 
-                st.divider()
+            st.markdown("</div>", unsafe_allow_html=True)
+            st.divider()
 
     # --- TAB 2: INTERACTIVE BRIEF ---
     with tab_brief:
         c1, c2 = st.columns([2, 1])
 
         with c1:
-            st.subheader("☀️ The Daily Download")
-            # Create a simple briefing text from the top 5 stories.
-            top_5 = filtered.head(5)['title'].tolist()
-            if top_5:
-                summary_text = "Here is your Morning News AI Briefing. Top stories include: " + ". ".join(top_5) + "."
-            else:
-                summary_text = "No major stories found matching your current filters."
+            with st.container():
+                st.subheader("☀️ The Daily Download")
+                top_5 = filtered.head(5)
+                if not top_5.empty:
+                    bullets = []
+                    for _, r in top_5.iterrows():
+                        short = (r.get("ai_summary") or r.get("description") or "").strip()
+                        short = clean_content_for_display(short)
+                        if len(short) > 200:
+                            short = short[:200] + "..."
+                        bullets.append(f"{r['title']}: {short}")
+                    summary_text = "Here is your Morning News AI Briefing.\n\n" + "\n".join(f"- {b}" for b in bullets)
+                else:
+                    summary_text = "No major stories found matching your current filters."
 
-            st.info(summary_text)
+                st.info(summary_text)
 
-            # Text-to-Speech Button
-            if st.button("▶️ Play Audio Briefing"):
-                audio_bytes = generate_audio(summary_text)
-                if audio_bytes:
-                    st.audio(audio_bytes, format='audio/mp3')
+                if st.button("▶️ Play Audio Briefing"):
+                    audio_bytes = generate_audio(summary_text)
+                    if audio_bytes:
+                        st.audio(audio_bytes, format='audio/mp3')
 
         with c2:
             st.subheader("Chat with News")
             user_query = st.text_input("Ask about the news:", placeholder="What happened with Apple?")
 
             if user_query:
-                # Basic Keyword Search (Simulating a RAG system for now)
-                hits = filtered[
-                    filtered['title'].str.contains(user_query, case=False) |
-                    filtered['description'].str.contains(user_query, case=False)
-                    ]
+                tokens = [t for t in re.split(r"\W+", user_query.lower()) if t]
+                if tokens:
+                    pattern = "|".join(re.escape(t) for t in tokens)
+                    mask = filtered['title'].str.contains(pattern, case=False, na=False)
+                    mask |= filtered['description'].str.contains(pattern, case=False, na=False)
+                    hits = filtered[mask]
+                else:
+                    hits = filtered.iloc[0:0]
 
                 if not hits.empty:
                     st.success(f"Found {len(hits)} relevant articles:")
                     for _, hit in hits.head(3).iterrows():
-                        st.write(f"- **{hit['title']}** ({hit['source']})")
+                        summary = clean_content_for_display(hit.get("ai_summary") or hit.get("description"))
+                        summary = (summary[:220] + "...") if summary and len(summary) > 220 else summary
+                        title = hit.get("title") or "(untitled)"
+                        url = hit.get("url")
+                        header = f"[{title}]({url})" if url else title
+                        st.markdown(
+                            f"- {header} ({hit['source']}, {hit['date_display']})\n\n"
+                            f"  {summary}"
+                        )
                 else:
                     st.warning("No relevant articles found in the current feed.")
 
@@ -410,28 +597,65 @@ def main():
     with tab_viz:
         st.subheader("Market & Topic Trends")
 
+        lookback_days = st.slider(
+            "Lookback window (days)",
+            min_value=1,
+            max_value=30,
+            value=7,
+            step=1,
+            help="Controls the time window for the news velocity plot.",
+        )
+
         # 1. Timeline Chart
         # I'm grouping by hour here to show the "velocity" of news dropping.
         timeline_df = filtered.copy()
+        cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=lookback_days)
+        timeline_df = timeline_df[timeline_df['published_at'] >= cutoff]
         timeline_df['date_hour'] = timeline_df['published_at'].dt.floor('h')
         volume_data = timeline_df.groupby('date_hour').size().reset_index(name='count')
+
+        title = "News Velocity"
+        if not volume_data.empty:
+            start_dt = volume_data['date_hour'].min().strftime('%b %d')
+            end_dt = volume_data['date_hour'].max().strftime('%b %d')
+            title = f"News Velocity ({start_dt} – {end_dt})"
 
         chart_timeline = alt.Chart(volume_data).mark_line(point=True).encode(
             x=alt.X('date_hour', title='Time'),
             y=alt.Y('count', title='Article Volume'),
             tooltip=['date_hour', 'count']
-        ).properties(title="News Velocity (Last 7 Days)").interactive()
+        ).properties(title=title).interactive()
 
         st.altair_chart(chart_timeline, use_container_width=True)
+
+        # Topic mix over time (stacked area)
+        topic_counts = (
+            timeline_df
+            .groupby(['date_hour', 'topic_display'])
+            .size()
+            .reset_index(name='count')
+        )
+        if not topic_counts.empty:
+            chart_topic = (
+                alt.Chart(topic_counts)
+                .mark_area()
+                .encode(
+                    x=alt.X('date_hour:T', title='Time'),
+                    y=alt.Y('count:Q', stack='normalize', title='Share of Articles'),
+                    color=alt.Color('topic_display:N', title='Topic'),
+                    tooltip=['date_hour', 'topic_display', 'count'],
+                )
+                .properties(title="Topic Mix Over Time")
+                .interactive()
+            )
+            st.altair_chart(chart_topic, use_container_width=True)
 
         # 2. Word Cloud Proxy
         # Streamlit doesn't have a native Word Cloud, so I built a frequency analysis
         # bar chart instead. It's cleaner and interactive.
         all_titles = " ".join(filtered['title'].dropna()).lower()
-        stop_words = set(
-            ['the', 'and', 'to', 'of', 'in', 'a', 'for', 'on', 'with', 'at', 'by', 'is', 'it', 'from', 'as', 'be',
-             'that', 'this', 'new', 'after', 'report', 'says'])
-        words = [w for w in all_titles.split() if len(w) > 4 and w not in stop_words]
+        words = [re.sub(r"[^a-z']", "", w) for w in all_titles.split()]
+        words = [w for w in words if len(w) > 4 and w not in STOP_WORDS]
 
         if words:
             word_freq = pd.Series(words).value_counts().reset_index()
@@ -446,6 +670,19 @@ def main():
             st.altair_chart(chart_cloud, use_container_width=True)
         else:
             st.info("Not enough data for keyword analysis.")
+
+        # 3. Sentiment Distribution
+        if not filtered.empty:
+            sentiment_chart = (
+                alt.Chart(filtered)
+                .mark_bar()
+                .encode(
+                    x=alt.X('sentiment_score:Q', bin=alt.Bin(maxbins=20), title='Sentiment Score'),
+                    y=alt.Y('count()', title='Article Count'),
+                )
+                .properties(title="Sentiment Distribution")
+            )
+            st.altair_chart(sentiment_chart, use_container_width=True)
 
 
 if __name__ == "__main__":

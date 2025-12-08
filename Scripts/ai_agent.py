@@ -5,37 +5,48 @@ Reads unprocessed articles from SQLite,
 runs AI tagging using OpenAI GPT 4o,
 performs embedding-based similarity clustering using all-MiniLM-L6-v2,
 generates per-category summaries,
-and writes tags/results back to the database. 
+and writes tags/results back to the database.
 
-Ensure to run ai_agent_schema.sql first.
+Schema note: tables are applied automatically via storage.ensure_db_exists()
+using schema.sql (no separate ai_agent_schema.sql needed).
 """
 
 import os
 import json
 import sqlite3
+import time
 from datetime import datetime, date
 from typing import List, Dict, Optional
 
 from tqdm import tqdm
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 
-from openai import OpenAI
+from openai import OpenAI, RateLimitError
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 
 from storage import connect as storage_connect
 from storage import get_db_path
 
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
 # -------------------------------------------------------------------
 # Load environment vars
 # -------------------------------------------------------------------
 load_dotenv()
+
+# Behavior toggles
+DRY_RUN = os.getenv("AI_AGENT_DRY_RUN", "0") == "1"
+MAX_RETRIES = int(os.getenv("AI_AGENT_MAX_RETRIES", "3"))
+BACKOFF_BASE = float(os.getenv("AI_AGENT_BACKOFF_BASE", "1.5"))
+AI_AGENT_MODEL = os.getenv("AI_AGENT_MODEL", "gpt-4o-mini")
+
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-if not OPENAI_API_KEY:
+if not OPENAI_API_KEY and not DRY_RUN:
     raise ValueError("Missing OPENAI_API_KEY in .env")
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 # -------------------------------------------------------------------
 # Embedding Model
@@ -55,7 +66,7 @@ class ArticleTag(BaseModel):
     political_bias: Optional[str]
 
     sentiment_label: str
-    sentiment_score: float
+    sentiment_score: float = Field(..., ge=-1, le=1)
 
     redundant_flag: int = 0
     cluster_id: Optional[str] = None
@@ -82,10 +93,21 @@ def fetch_unprocessed_articles(limit: int = 50) -> List[sqlite3.Row]:
 # -------------------------------------------------------------------
 # OpenAI Tagging (GPT-4o-mini)
 # -------------------------------------------------------------------
-def analyze_article_with_openai(article: sqlite3.Row) -> ArticleTag:
+def analyze_article_with_openai(article: sqlite3.Row) -> Optional[ArticleTag]:
     """
     Return pydantic-validated tag object.
     """
+
+    if DRY_RUN:
+        return ArticleTag(
+            quality_score=0.5,
+            reliability_score=0.5,
+            misinformation_flag=0,
+            extreme_bias_flag=0,
+            political_bias=None,
+            sentiment_label="neutral",
+            sentiment_score=0.0,
+        )
 
     text = article["content"] or article["description"] or article["title"]
     text = text[:4000]  # cost-saving truncation
@@ -114,21 +136,23 @@ Return ONLY JSON with the following fields:
 }}
 """
 
-    completion = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=300,
-        temperature=0.2,
-        response_format={"type": "json_object"},
-    )
-
-    data = completion.choices[0].message.content
-    parsed = json.loads(data)
     try:
-        return ArticleTag(**parsed)
-    except ValidationError as e:
-        print("VALIDATION ERROR:", e)
-        raise
+        completion = _openai_chat(
+            model=AI_AGENT_MODEL,
+            prompt=prompt,
+            response_format={"type": "json_object"},
+            max_tokens=300,
+            temperature=0.2,
+        )
+    except RateLimitError as exc:
+        print(f"[ai_agent] Rate limit/quota hit: {exc}")
+        return None
+    except Exception as exc:
+        print(f"[ai_agent] OpenAI error: {exc}")
+        return None
+
+    parsed = json.loads(completion)
+    return ArticleTag(**parsed)
 
 
 # -------------------------------------------------------------------
@@ -143,10 +167,20 @@ def compute_cluster_ids(articles: List[sqlite3.Row]) -> Dict[str, str]:
     if not articles:
         return {}
 
+    def _get(field: str, article):
+        if isinstance(article, sqlite3.Row) or hasattr(article, "keys"):
+            return article[field]
+        if isinstance(article, (list, tuple)):
+            index_map = {"id": 0, "title": 1, "description": 2, "content": 3}
+            idx = index_map.get(field)
+            return article[idx] if idx is not None and len(article) > idx else None
+        return None
+
     texts = [
-        (a["content"] or a["description"] or a["title"])[:2000] for a in articles
+        (_get("content", a) or _get("description", a) or _get("title", a) or "")[:2000]
+        for a in articles
     ]
-    ids = [a["id"] for a in articles]
+    ids = [_get("id", a) for a in articles]
 
     embeddings = embedder.encode(texts, convert_to_numpy=True)
     sim = cosine_similarity(embeddings)
@@ -175,14 +209,39 @@ def compute_cluster_ids(articles: List[sqlite3.Row]) -> Dict[str, str]:
     return cluster_ids
 
 
+def _openai_chat(model: str, prompt: str, *, response_format=None, max_tokens: int = 300, temperature: float = 0.2) -> str:
+    """Call OpenAI chat with basic retry/backoff and return content string."""
+    last_exc: Exception | None = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            completion = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=max_tokens,
+                temperature=temperature,
+                response_format=response_format,
+            )
+            return completion.choices[0].message.content
+        except Exception as exc:  # pragma: no cover - network dependent
+            last_exc = exc
+            sleep_for = BACKOFF_BASE ** (attempt - 1)
+            print(f"[ai_agent] OpenAI call failed (attempt {attempt}/{MAX_RETRIES}): {exc}; retrying in {sleep_for:.1f}s")
+            time.sleep(sleep_for)
+    print("[ai_agent] OpenAI call failed after retries.")
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("OpenAI call failed without exception")
+
+
 # -------------------------------------------------------------------
 # Write tag to DB
 # -------------------------------------------------------------------
 def write_article_tags_to_db(article_id: str, tag: ArticleTag):
+    print(f"[ai_agent] Writing tags for {article_id}")
     with storage_connect() as conn:
         conn.execute(
             """
-            INSERT INTO article_ai_tags (
+            INSERT OR REPLACE INTO article_ai_tags (
                 article_id, quality_score, reliability_score,
                 misinformation_flag, extreme_bias_flag, political_bias,
                 sentiment_label, sentiment_score,
@@ -215,6 +274,9 @@ def generate_category_summary(category: str, article_texts: List[str]) -> str:
     Take all the article text from a category and produce a daily summary.
     """
 
+    if DRY_RUN:
+        return f"[DRY RUN] Summary for {category} ({len(article_texts)} articles)."
+
     joined_text = "\n\n".join([t[:1500] for t in article_texts])[:8000]
 
     prompt = f"""
@@ -227,14 +289,12 @@ ARTICLES:
 {joined_text}
 """
 
-    completion = client.chat.completions.create(
-        model="gpt-4o",
-        messages=[{"role": "user", "content": prompt}],
+    return _openai_chat(
+        model=AI_AGENT_MODEL,
+        prompt=prompt,
         max_tokens=300,
         temperature=0.3,
     )
-
-    return completion.choices[0].message.content.strip()
 
 
 def write_summary_to_db(category: str, summary_text: str):
@@ -277,6 +337,8 @@ def run_daily_agent():
         return
 
     print(f"Found {len(articles)} new articles.")
+    if DRY_RUN:
+        print("AI_AGENT_DRY_RUN=1: skipping external API calls; writing placeholder summaries if any.")
 
     # Step 1: Compute cluster IDs
     print("\nComputing similarity clusters...")
@@ -286,7 +348,10 @@ def run_daily_agent():
     print("\nTagging articles with AI...")
     for article in tqdm(articles):
         tag = analyze_article_with_openai(article)
-        tag.cluster_id = cluster_map[article["id"]]
+        if not tag:
+            print(f"[ai_agent] Skipping article {article['id']} due to tagging failure.")
+            continue
+        tag.cluster_id = cluster_map.get(article["id"], article["id"])
         tag.redundant_flag = int(tag.cluster_id != article["id"])
         write_article_tags_to_db(article["id"], tag)
 
@@ -299,6 +364,8 @@ def run_daily_agent():
     with storage_connect() as conn:
         for category in categories:
             keywords = CATEGORY_KEYWORDS.get(category, [])
+            if not keywords:
+                continue
             rows = conn.execute(
                 f"""
                 SELECT a.title, a.description, a.content
@@ -309,9 +376,6 @@ def run_daily_agent():
             ).fetchall()
 
             if not rows:
-                continue
-
-            if not keywords:
                 continue
 
             texts = [

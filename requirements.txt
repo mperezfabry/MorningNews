@@ -5,3 +5,9 @@ scikit-learn
 tqdm
 pydantic
 newsapi-python
+requests
+streamlit
+altair
+pandas
+gtts
+google-generativeai
