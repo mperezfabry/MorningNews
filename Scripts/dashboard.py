@@ -1,4 +1,12 @@
+import sys
+import os
 from pathlib import Path
+
+# Add the current directory to sys.path so we can import local modules
+# regardless of whether the app is run from root or from the Scripts folder.
+current_dir = os.path.dirname(os.path.abspath(__file__))
+if current_dir not in sys.path:
+    sys.path.append(current_dir)
 
 import streamlit as st
 import pandas as pd
@@ -11,11 +19,8 @@ import json
 from typing import Dict, List
 
 # Attempt to import gTTS for the audio feature.
-# I wrapped this in a try/except block so the whole app doesn't crash if
-# someone forgets to 'pip install gTTS'. It just disables the audio button.
 try:
     from gtts import gTTS
-
     HAS_AUDIO = True
 except ImportError:
     HAS_AUDIO = False
@@ -39,8 +44,7 @@ STOP_WORDS = set(
     ]
 )
 
-# FIX: Re-implementing the robust path definition.
-# We import 'get_db_path' and assign its result to the global DB_PATH variable.
+# FIX: Robust import logic
 try:
     from storage import get_db_path
     from s3_storage import download_db_from_s3
@@ -56,8 +60,8 @@ try:
     if not DB_PATH.exists():
         st.error(f"Critical Error: Database not found at {DB_PATH}")
         st.stop()
-except ImportError:
-    st.error("Critical Error: Could not import 'storage.py' or 's3_storage.py'.")
+except ImportError as e:
+    st.error(f"Critical Error: Could not import dependency modules. Error: {e}")
     st.stop()
 
 def trigger_lambda_update():
