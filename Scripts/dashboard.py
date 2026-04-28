@@ -360,12 +360,15 @@ def get_filters(df: pd.DataFrame, coverage: Dict[str, float]) -> Dict:
             )
 
         st.divider()
-        if st.button("🔄 Update News Feed", help='While it is possible to update daily, automatically, or at any more frequent interval, the system is a demo and updating automatically costs money.'):
+        if st.button("Update News Feed", help='While it is possible to update daily, automatically, or at any more frequent interval, the system is a demo so we have chosen to trigger updates manually to save costs.'):
             with st.spinner("Triggering AI Ingestion Pipeline..."):
                 if trigger_lambda_update():
                     st.success("Update triggered! Refresh in a few minutes.")
                 else:
                     st.error("Could not trigger update.")
+
+        st.sidebar.markdown("---")
+        st.sidebar.caption("Created by Michael Perez, Ray Odian-Floyd, and Mark Crisci.")
 
     return {
         "date_selection": selected,
@@ -463,7 +466,7 @@ def main():
         st.subheader(f"Top Stories ({len(filtered)})")
 
         if not bias_data_present:
-            st.info("Bias meter data missing (bias_score ~ 0). Run `python3 Scripts/ai_analysis.py` with GEMINI_API_KEY to populate AI fields.")
+            st.info("Bias meter data missing. Click 'Update News Feed' in the sidebar or run Scripts/ai_analysis.py with OPENAI_API_KEY to populate AI fields.")
 
         # Quick category pills
         top_categories = [c for c in sorted(df['topic_display'].unique()) if c and c.lower() != "uncategorized"][:8]
