@@ -113,7 +113,7 @@ def analyze_article_with_openai(article: sqlite3.Row) -> Optional[ArticleTag]:
     text = text[:4000]  # cost-saving truncation
 
     prompt = f"""
-You are an AI assistant analyzing a news article.
+You are an AI assistant analyzing a news article for a professional briefing service.
 
 ARTICLE TITLE:
 {article['title']}
@@ -129,11 +129,22 @@ Return ONLY JSON with the following fields:
   "misinformation_flag": 0 or 1,
   "extreme_bias_flag": 0 or 1,
 
-  "political_bias": string or null,
+  "political_bias": "Far Left" | "Center-Left" | "Centrist" | "Center-Right" | "Far Right",
+  "bias_score": float (-1.0 to 1.0),
 
   "sentiment_label": "positive" | "neutral" | "negative",
-  "sentiment_score": float (-1 to 1)
+  "sentiment_score": float (0.0 to 1.0)
 }}
+
+DEFINITIONS:
+- "bias_score": -1.0 (Far Left) to 1.0 (Far Right). 0.0 is Centrist.
+- "sentiment_score": 0.0 (Negative) to 1.0 (Positive). 0.5 is Neutral.
+- "political_bias": Categorical label matching the bias_score.
+
+IMPORTANT: 
+Do NOT assign bias based on keywords or named entities (e.g., "Trump", "Biden", "GOP", "Democrats"). 
+Analyze the framing, tone, and whether multiple perspectives are presented fairly. 
+Critiquing a figure with factual evidence is not necessarily biased.
 """
 
     try:

@@ -43,15 +43,35 @@ STOP_WORDS = set(
 # We import 'get_db_path' and assign its result to the global DB_PATH variable.
 try:
     from storage import get_db_path
+    from s3_storage import download_db_from_s3
+    import boto3
 
     DB_PATH = Path(get_db_path())
+    
+    # Ensure DB is present (download from S3 if missing)
+    if not DB_PATH.exists():
+        with st.spinner("Downloading database from S3..."):
+            download_db_from_s3()
+            
     if not DB_PATH.exists():
         st.error(f"Critical Error: Database not found at {DB_PATH}")
         st.stop()
 except ImportError:
-    st.error("Critical Error: Could not import 'storage.py'. Please ensure it exists in the project root.")
+    st.error("Critical Error: Could not import 'storage.py' or 's3_storage.py'.")
     st.stop()
-# END FIX
+
+def trigger_lambda_update():
+    """Triggers the AWS Lambda function to run ingestion."""
+    try:
+        lambda_client = boto3.client('lambda', region_name='us-east-1') # Adjust region if needed
+        response = lambda_client.invoke(
+            FunctionName='morningnews-ingestion',
+            InvocationType='Event' # Asynchronous
+        )
+        return True
+    except Exception as e:
+        st.error(f"Failed to trigger update: {e}")
+        return False
 
 # Custom CSS
 # I added some custom styling here to make the article cards look cleaner and
@@ -324,6 +344,14 @@ def get_filters(df: pd.DataFrame, coverage: Dict[str, float]) -> Dict:
                 f"Sentiment tags: Positive ≥ {SENTIMENT_POSITIVE_THRESHOLD}, "
                 f"Negative < {SENTIMENT_NEGATIVE_THRESHOLD}; bias meter ranges -1 (Left) to 1 (Right)."
             )
+
+        st.divider()
+        if st.button("🔄 Update News Feed", help='While it is possible to update daily, automatically, or at any more frequent interval, the system is a demo and updating automatically costs money.'):
+            with st.spinner("Triggering AI Ingestion Pipeline..."):
+                if trigger_lambda_update():
+                    st.success("Update triggered! Refresh in a few minutes.")
+                else:
+                    st.error("Could not trigger update.")
 
     return {
         "date_selection": selected,
