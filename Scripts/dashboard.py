@@ -2,11 +2,11 @@ import sys
 import os
 from pathlib import Path
 
-# Add the current directory to sys.path so we can import local modules
-# regardless of whether the app is run from root or from the Scripts folder.
-current_dir = os.path.dirname(os.path.abspath(__file__))
-if current_dir not in sys.path:
-    sys.path.append(current_dir)
+# Add the project root to sys.path to support absolute imports (e.g., from Scripts.storage)
+# regardless of whether the app is run from root or from within the Scripts folder.
+root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if root_dir not in sys.path:
+    sys.path.insert(0, root_dir)
 
 import streamlit as st
 import pandas as pd
@@ -44,10 +44,10 @@ STOP_WORDS = set(
     ]
 )
 
-# FIX: Robust import logic
+# FIX: Robust import logic using absolute package paths
 try:
-    from storage import get_db_path
-    from s3_storage import download_db_from_s3
+    from Scripts.storage import get_db_path
+    from Scripts.s3_storage import download_db_from_s3
     import boto3
 
     DB_PATH = Path(get_db_path())
@@ -61,7 +61,7 @@ try:
         st.error(f"Critical Error: Database not found at {DB_PATH}")
         st.stop()
 except ImportError as e:
-    st.error(f"Critical Error: Could not import dependency modules. Error: {e}")
+    st.error(f"Critical Error: Could not import dependency modules. PYTHONPATH: {sys.path}. Error: {e}")
     st.stop()
 
 def trigger_lambda_update():
