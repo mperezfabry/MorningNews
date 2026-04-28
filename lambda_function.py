@@ -8,8 +8,12 @@ from Scripts.storage import get_db_path
 def handler(event, context):
     print("Starting MorningNews Ingestion Pipeline via Lambda...")
     
-    # 1. Setup DB path for Lambda /tmp
+    # 1. Setup Environment
     os.environ["MORNINGNEWS_DB_PATH"] = "/tmp/morningnews.db"
+    # Ensure HF uses the baked-in cache
+    if "HF_HOME" not in os.environ:
+        os.environ["HF_HOME"] = "/var/task/hf_cache"
+        
     db_path = get_db_path()
     
     # 2. Download DB from S3
@@ -17,8 +21,6 @@ def handler(event, context):
         download_db_from_s3()
     except Exception as e:
         print(f"No existing DB found on S3 or download failed: {e}")
-        # If it fails, we might want to start fresh or fail. 
-        # For now, let's assume we need the DB.
     
     # 3. Run Ingestion Scripts
     scripts = [
@@ -32,7 +34,8 @@ def handler(event, context):
         print(f"Running {script}...")
         try:
             # We use sys.executable to ensure we use the same python environment
-            result = subprocess.run([sys.executable, script], capture_output=True, text=True)
+            # and pass the environment variables explicitly
+            result = subprocess.run([sys.executable, script], capture_output=True, text=True, env=os.environ)
             if result.returncode != 0:
                 print(f"Error running {script}: {result.stderr}")
             else:
