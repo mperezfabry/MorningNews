@@ -28,7 +28,7 @@ if not OPENAI_API_KEY and not DRY_RUN:
     sys.exit(1)
 
 from openai import OpenAI, RateLimitError
-from storage import connect as storage_connect, ensure_db_exists, get_db_path
+from Scripts.storage import connect as storage_connect, ensure_db_exists, get_db_path
 
 client: Optional[OpenAI] = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 

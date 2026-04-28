@@ -145,28 +145,38 @@ st.markdown("""
 def load_data():
     """
     Connects to SQLite and pulls recent articles.
-    I'm caching this for 5 minutes (ttl=300) so we don't hammer the database
-    every time we click a button.
+    We use storage.connect() because it ensures all schema migrations 
+    (like adding sentiment_score columns) are applied.
     """
-    with sqlite3.connect(DB_PATH) as conn:
-        query = """
-            SELECT 
-                id, title, description, author, source, published_at, url, content,
-                sentiment_score, bias_score, is_clickbait, ai_summary, topic, provider
-            FROM articles
-            ORDER BY published_at DESC
-            LIMIT 2000
-        """
-        df = pd.read_sql_query(query, conn)
+    from Scripts.storage import connect as storage_connect
+    try:
+        with storage_connect() as conn:
+            query = """
+                SELECT 
+                    id, title, description, author, source, published_at, url, content,
+                    sentiment_score, bias_score, is_clickbait, ai_summary, topic, provider
+                FROM articles
+                ORDER BY published_at DESC
+                LIMIT 2000
+            """
+            df = pd.read_sql_query(query, conn)
+    except Exception as e:
+        st.error(f"Database Query Error: {e}")
+        # Show more info for debugging
+        st.info(f"DB Path: {DB_PATH}")
+        if DB_PATH.exists():
+            st.info(f"File Size: {DB_PATH.stat().st_size} bytes")
+        else:
+            st.warning("File does not exist at this path.")
+        return pd.DataFrame()
 
     if df.empty:
         return df
 
     try:
         df['published_at'] = pd.to_datetime(df['published_at'], format='mixed', errors='coerce', utc=True)
-    except ValueError:
-        df['published_at'] = pd.to_datetime(df['published_at'], infer_datetime_format=True, errors='coerce',
-                                            utc=True)
+    except Exception:
+        df['published_at'] = pd.to_datetime(df['published_at'], errors='coerce', utc=True)
 
     df = df.dropna(subset=['published_at'])
     df['date_display'] = df['published_at'].dt.strftime('%b %d, %H:%M')

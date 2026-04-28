@@ -26,8 +26,8 @@ from openai import OpenAI, RateLimitError
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 
-from storage import connect as storage_connect
-from storage import get_db_path
+from Scripts.storage import connect as storage_connect
+from Scripts.storage import get_db_path
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
