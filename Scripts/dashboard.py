@@ -134,7 +134,7 @@ st.markdown("""
         font-weight: 700;
         margin-right: 6px;
     }
-    .badge-provider { background: #f0f9ff; color: #0f172a; }
+     .badge-provider { background: #f0f9ff; color: #0f172a; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -470,18 +470,20 @@ def main():
 
         # Quick category pills
         top_categories = [c for c in sorted(df['topic_display'].unique()) if c and c.lower() != "uncategorized"][:8]
-        cols = st.columns(len(top_categories) + 1) if top_categories else st.columns(1)
-        with cols[0]:
-            if st.button("All", key="cat_all"):
+        if top_categories:
+            pill_options = ["All"] + top_categories
+            current_filter = st.session_state.get("category_filter", [])
+            default_pill = current_filter[0] if len(current_filter) == 1 and current_filter[0] in pill_options else "All"
+            selected_pill = st.segmented_control(
+                options=pill_options,
+                default=default_pill,
+                key="quick_category_pills",
+                label_visibility="collapsed"
+            )
+            if selected_pill is None or selected_pill == "All":
                 st.session_state.category_filter = []
-                st.rerun()
-        for idx, cat in enumerate(top_categories, start=1):
-            with cols[idx]:
-                active = cat in st.session_state.get("category_filter", [])
-                label = f"✅ {cat}" if active else cat
-                if st.button(label, key=f"cat_{cat}"):
-                    st.session_state.category_filter = [] if active else [cat]
-                    st.rerun()
+            else:
+                st.session_state.category_filter = [selected_pill]
 
         # Simple Pagination with session state
         page_size = 20
