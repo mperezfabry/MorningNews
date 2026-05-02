@@ -468,22 +468,23 @@ def main():
         if not bias_data_present:
             st.info("Bias meter data missing. Click 'Update News Feed' in the sidebar or run Scripts/ai_analysis.py with OPENAI_API_KEY to populate AI fields.")
 
-        # Quick category pills
+        # Quick category selector
         top_categories = [c for c in sorted(df['topic_display'].unique()) if c and c.lower() != "uncategorized"][:8]
         if top_categories:
-            pill_options = ["All"] + top_categories
+            options = ["All"] + top_categories
             current_filter = st.session_state.get("category_filter", [])
-            default_pill = current_filter[0] if len(current_filter) == 1 and current_filter[0] in pill_options else "All"
-            selected_pill = st.segmented_control(
-                options=pill_options,
-                default=default_pill,
-                key="quick_category_pills",
+            default = current_filter[0] if len(current_filter) == 1 and current_filter[0] in options else "All"
+            selected = st.selectbox(
+                "Quick Category",
+                options=options,
+                index=options.index(default),
+                key="quick_category_select",
                 label_visibility="collapsed"
             )
-            if selected_pill is None or selected_pill == "All":
+            if selected == "All":
                 st.session_state.category_filter = []
             else:
-                st.session_state.category_filter = [selected_pill]
+                st.session_state.category_filter = [selected]
 
         # Simple Pagination with session state
         page_size = 20
