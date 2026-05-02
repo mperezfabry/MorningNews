@@ -11,3 +11,4 @@ altair
 pandas
 gtts
 google-generativeai
+boto3

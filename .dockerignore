@@ -1,11 +1,10 @@
+.git
 .env
-__pycache__/
+__pycache__
 *.pyc
 data/*.db
 data/*.json
-
-# AWS/Lambda artifacts
 lambda_trust_policy.json
 lambda_s3_policy.json
 Dockerfile
-
+.dockerignore

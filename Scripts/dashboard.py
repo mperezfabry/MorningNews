@@ -1,4 +1,12 @@
+import sys
+import os
 from pathlib import Path
+
+# Add the project root to sys.path to support absolute imports (e.g., from Scripts.storage)
+# regardless of whether the app is run from root or from within the Scripts folder.
+root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if root_dir not in sys.path:
+    sys.path.insert(0, root_dir)
 
 import streamlit as st
 import pandas as pd
@@ -11,11 +19,8 @@ import json
 from typing import Dict, List
 
 # Attempt to import gTTS for the audio feature.
-# I wrapped this in a try/except block so the whole app doesn't crash if
-# someone forgets to 'pip install gTTS'. It just disables the audio button.
 try:
     from gtts import gTTS
-
     HAS_AUDIO = True
 except ImportError:
     HAS_AUDIO = False
@@ -39,19 +44,38 @@ STOP_WORDS = set(
     ]
 )
 
-# FIX: Re-implementing the robust path definition.
-# We import 'get_db_path' and assign its result to the global DB_PATH variable.
+# FIX: Robust import logic using absolute package paths
 try:
-    from storage import get_db_path
+    from Scripts.storage import get_db_path
+    from Scripts.s3_storage import download_db_from_s3
+    import boto3
 
     DB_PATH = Path(get_db_path())
+    
+    # Ensure DB is present (download from S3 if missing)
+    if not DB_PATH.exists():
+        with st.spinner("Downloading database from S3..."):
+            download_db_from_s3()
+            
     if not DB_PATH.exists():
         st.error(f"Critical Error: Database not found at {DB_PATH}")
         st.stop()
-except ImportError:
-    st.error("Critical Error: Could not import 'storage.py'. Please ensure it exists in the project root.")
+except ImportError as e:
+    st.error(f"Critical Error: Could not import dependency modules. PYTHONPATH: {sys.path}. Error: {e}")
     st.stop()
-# END FIX
+
+def trigger_lambda_update():
+    """Triggers the AWS Lambda function to run ingestion."""
+    try:
+        lambda_client = boto3.client('lambda', region_name='us-east-1') # Adjust region if needed
+        response = lambda_client.invoke(
+            FunctionName='morningnews-ingestion',
+            InvocationType='Event' # Asynchronous
+        )
+        return True
+    except Exception as e:
+        st.error(f"Failed to trigger update: {e}")
+        return False
 
 # Custom CSS
 # I added some custom styling here to make the article cards look cleaner and
@@ -110,7 +134,7 @@ st.markdown("""
         font-weight: 700;
         margin-right: 6px;
     }
-    .badge-provider { background: #f0f9ff; color: #0f172a; }
+     .badge-provider { background: #f0f9ff; color: #0f172a; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -121,28 +145,38 @@ st.markdown("""
 def load_data():
     """
     Connects to SQLite and pulls recent articles.
-    I'm caching this for 5 minutes (ttl=300) so we don't hammer the database
-    every time we click a button.
+    We use storage.connect() because it ensures all schema migrations 
+    (like adding sentiment_score columns) are applied.
     """
-    with sqlite3.connect(DB_PATH) as conn:
-        query = """
-            SELECT 
-                id, title, description, author, source, published_at, url, content,
-                sentiment_score, bias_score, is_clickbait, ai_summary, topic, provider
-            FROM articles
-            ORDER BY published_at DESC
-            LIMIT 2000
-        """
-        df = pd.read_sql_query(query, conn)
+    from Scripts.storage import connect as storage_connect
+    try:
+        with storage_connect() as conn:
+            query = """
+                SELECT 
+                    id, title, description, author, source, published_at, url, content,
+                    sentiment_score, bias_score, is_clickbait, ai_summary, topic, provider
+                FROM articles
+                ORDER BY published_at DESC
+                LIMIT 2000
+            """
+            df = pd.read_sql_query(query, conn)
+    except Exception as e:
+        st.error(f"Database Query Error: {e}")
+        # Show more info for debugging
+        st.info(f"DB Path: {DB_PATH}")
+        if DB_PATH.exists():
+            st.info(f"File Size: {DB_PATH.stat().st_size} bytes")
+        else:
+            st.warning("File does not exist at this path.")
+        return pd.DataFrame()
 
     if df.empty:
         return df
 
     try:
         df['published_at'] = pd.to_datetime(df['published_at'], format='mixed', errors='coerce', utc=True)
-    except ValueError:
-        df['published_at'] = pd.to_datetime(df['published_at'], infer_datetime_format=True, errors='coerce',
-                                            utc=True)
+    except Exception:
+        df['published_at'] = pd.to_datetime(df['published_at'], errors='coerce', utc=True)
 
     df = df.dropna(subset=['published_at'])
     df['date_display'] = df['published_at'].dt.strftime('%b %d, %H:%M')
@@ -325,6 +359,17 @@ def get_filters(df: pd.DataFrame, coverage: Dict[str, float]) -> Dict:
                 f"Negative < {SENTIMENT_NEGATIVE_THRESHOLD}; bias meter ranges -1 (Left) to 1 (Right)."
             )
 
+        st.divider()
+        if st.button("Update News Feed", help='While it is possible to update daily, automatically, or at any more frequent interval, the system is a demo so we have chosen to trigger updates manually to save costs.'):
+            with st.spinner("Triggering AI Ingestion Pipeline..."):
+                if trigger_lambda_update():
+                    st.success("Update triggered! Refresh in a few minutes.")
+                else:
+                    st.error("Could not trigger update.")
+
+        st.sidebar.markdown("---")
+        st.sidebar.caption("Created by Michael Perez, Ray Odian-Floyd, and Mark Crisci.")
+
     return {
         "date_selection": selected,
         "sources": sources,
@@ -421,22 +466,25 @@ def main():
         st.subheader(f"Top Stories ({len(filtered)})")
 
         if not bias_data_present:
-            st.info("Bias meter data missing (bias_score ~ 0). Run `python3 Scripts/ai_analysis.py` with GEMINI_API_KEY to populate AI fields.")
+            st.info("Bias meter data missing. Click 'Update News Feed' in the sidebar or run Scripts/ai_analysis.py with OPENAI_API_KEY to populate AI fields.")
 
-        # Quick category pills
+        # Quick category selector
         top_categories = [c for c in sorted(df['topic_display'].unique()) if c and c.lower() != "uncategorized"][:8]
-        cols = st.columns(len(top_categories) + 1) if top_categories else st.columns(1)
-        with cols[0]:
-            if st.button("All", key="cat_all"):
+        if top_categories:
+            options = ["All"] + top_categories
+            current_filter = st.session_state.get("category_filter", [])
+            default = current_filter[0] if len(current_filter) == 1 and current_filter[0] in options else "All"
+            selected = st.selectbox(
+                "Quick Category",
+                options=options,
+                index=options.index(default),
+                key="quick_category_select",
+                label_visibility="collapsed"
+            )
+            if selected == "All":
                 st.session_state.category_filter = []
-                st.rerun()
-        for idx, cat in enumerate(top_categories, start=1):
-            with cols[idx]:
-                active = cat in st.session_state.get("category_filter", [])
-                label = f"✅ {cat}" if active else cat
-                if st.button(label, key=f"cat_{cat}"):
-                    st.session_state.category_filter = [] if active else [cat]
-                    st.rerun()
+            else:
+                st.session_state.category_filter = [selected]
 
         # Simple Pagination with session state
         page_size = 20

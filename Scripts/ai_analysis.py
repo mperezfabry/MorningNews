@@ -28,7 +28,7 @@ if not OPENAI_API_KEY and not DRY_RUN:
     sys.exit(1)
 
 from openai import OpenAI, RateLimitError
-from storage import connect as storage_connect, ensure_db_exists, get_db_path
+from Scripts.storage import connect as storage_connect, ensure_db_exists, get_db_path
 
 client: Optional[OpenAI] = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
@@ -106,18 +106,44 @@ def analyze_article_with_llm(article):
         }
 
     prompt = f"""
-    Analyze this news article.
+    You are an expert news analyst specializing in objective media assessment. 
+    Analyze the following article for sentiment, political bias, and quality.
+
+    ARTICLE DETAILS:
     Title: {article['title']}
     Source: {article['source']}
     Description: {desc}
 
+    SCORING RUBRIC:
+    1. "sentiment_score" (float 0.0 to 1.0):
+       - 0.0: Extremely negative/tragic/hostile.
+       - 0.5: Strictly neutral/factual/objective.
+       - 1.0: Extremely positive/uplifting/optimistic.
+       - Do NOT default to 0.5 unless the text is purely data or a neutral list. Look for emotional resonance in verbs and adjectives.
 
-    Return valid JSON (NO markdown formatting) with:
-    - "sentiment_score": float 0.0 (Negative) to 1.0 (Positive).
-    - "bias_score": float -1.0 (Left) to 1.0 (Right).
-    - "is_clickbait": boolean.
-    - "ai_summary": 2 sentence summary.
-   """
+    2. "bias_score" (float -1.0 to 1.0):
+       - -1.0: Far Left (Progressive, Socialist).
+       - -0.5: Center-Left (Liberal, Democrat-leaning).
+       - 0.0: Centrist/Balanced (Presents multiple perspectives equally).
+       - 0.5: Center-Right (Conservative, Republican-leaning).
+       - 1.0: Far Right (Reactionary, Nationalist).
+       - IMPORTANT: Do NOT assign scores based on keywords alone (e.g., mentioning "Trump" or "Biden" is NOT bias). 
+         Analyze the framing, the selection of experts quoted, and the tone. If an article critiques a public figure using factual evidence without inflammatory language, it may still be centrist.
+
+    3. "is_clickbait" (boolean):
+       - True if the title uses hyperbole, leaves out key information to force a click, or is sensationalist.
+
+    4. "ai_summary" (string):
+       - A concise, 2-sentence objective summary.
+
+    Return valid JSON (NO markdown formatting):
+    {{
+      "sentiment_score": float,
+      "bias_score": float,
+      "is_clickbait": boolean,
+      "ai_summary": string
+    }}
+    """
 
     try:
         text_response = _generate_with_retry(prompt)
