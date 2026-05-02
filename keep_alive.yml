@@ -1,0 +1,15 @@
+name: Keep Streamlit Awake
+on:
+  schedule:
+    - cron: "0 */10 * * *" # Runs every 10 hours
+jobs:
+  keep-alive:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Push empty commit
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git commit --allow-empty -m "chore: keep Streamlit app awake"
+          git push
